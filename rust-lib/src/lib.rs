@@ -1,6 +1,6 @@
 //! monero_wallet_backend — the Monero wallet family's coordinator.
 //!
-//! Sits between the two UIs and the engine: keeps the wallet registry, drives the wallet
+//! Sits between the wallet surfaces (one GUI, one headless CLI) and the engine: keeps the wallet registry, drives the wallet
 //! core's tickets, polls sync and balances into events, normalises history, and orchestrates
 //! a send as build → review → broadcast. It holds no key material and caches no password —
 //! those exist only inside `monero_wallet_core_module`.

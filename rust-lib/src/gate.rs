@@ -97,7 +97,8 @@ pub fn holds_any_role(role_holders: &[String], caller: &Caller) -> bool {
 }
 
 /// Custodian-only: everything that takes or reveals the wallet password or a key, plus the
-/// network switch (it is what the keys app owns). A list, so the set is one assertable value.
+/// network switch — switching networks re-targets which wallet files are addressable at all, so
+/// it belongs with opening rather than with spending. A list, so the set is one assertable value.
 pub const CUSTODIAN_METHODS: &[&str] = &[
     "open_wallet", "create_wallet", "restore_from_seed", "restore_from_keys",
     "change_password", "reveal_seed", "reveal_view_key", "set_active_network",
@@ -196,8 +197,14 @@ mod tests {
     fn either_role_may_close_the_session() {
         let mut r = Roles::default();
         assert!(session_admits("close_wallet", &r, &m("monero_wallet_ui")));
+        // Both defaults name one GUI, so "either role" is only expressible via configure — cover
+        // BOTH branches explicitly or the || in session_admits goes untested.
         r.configure(r#"{"custodians":"monero_wallet_cli"}"#).unwrap();
         assert!(session_admits("close_wallet", &r, &m("monero_wallet_cli")), "a custodian alone may end the session");
+        r.configure(r#"{"approvers":"monero_wallet_cli"}"#).unwrap();
+        assert!(session_admits("close_wallet", &r, &m("monero_wallet_cli")), "an approver alone may end the session too");
+        r.configure(r#"{}"#).unwrap();
+        assert!(!session_admits("close_wallet", &r, &m("monero_wallet_cli")), "holding neither role ends nothing");
         assert!(!session_admits("close_wallet", &r, &m("some_other_module")));
         assert!(requester_admits(&m("some_other_module")), "but any named module may ask for a send to be built");
         assert!(!requester_admits(&Caller::Derived { parent: "a".into(), leaf: "b".into() }));
