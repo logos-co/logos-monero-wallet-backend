@@ -21,7 +21,8 @@ use crate::model::{format_xmr, is_network, normalize_history, parse_xmr, Registr
 pub trait MoneroWalletBackendModule: Send + Sync + 'static {
     /// Name who holds the two roles: `{ approvers?, custodians? }` → `{ ok, approvers, custodians }`.
     /// TOTAL — a role the document does not name is held by nobody — and in force at once, on a
-    /// module serving the defaults (`monero_keys_ui` custodian, `monero_wallet_ui` approver) since
+    /// module serving the defaults (`monero_wallet_ui` holds both roles: Monero's password is a
+    /// once-per-session unlock, so the surface that spends is the surface that unlocks) since
     /// it loaded. A malformed document is refused and the roles in force stay.
     ///
     /// UNGATED, deliberately and for now — the same standing gap keystore_module documents: any

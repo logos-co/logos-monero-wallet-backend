@@ -6,7 +6,13 @@
 use serde::Deserialize;
 
 /// Default custodian — the surface that takes the wallet password and shows a seed.
-pub const DEFAULT_CUSTODIAN: &str = "monero_keys_ui";
+///
+/// The same surface as the approver, and deliberately so: Monero's password is a
+/// once-per-session UNLOCK for one wallet file, not a per-signature credential, so there is no
+/// second GUI for it to be split away from. The roles stay separate VALUES because they are
+/// sets: an operator enrolling a headless module can grant one without the other, which is the
+/// whole point of `configure`.
+pub const DEFAULT_CUSTODIAN: &str = "monero_wallet_ui";
 /// Default approver — the surface that reviews a built transaction and broadcasts it.
 pub const DEFAULT_APPROVER: &str = "monero_wallet_ui";
 
@@ -41,7 +47,7 @@ impl Default for Roles {
     }
 }
 
-/// One role's holders, as a bare name or a list — `"custodians": "monero_keys_ui"` is the common case.
+/// One role's holders, as a bare name or a list — `"custodians": "monero_wallet_ui"` is the common case.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum RoleWire { One(String), Many(Vec<String>) }
@@ -129,12 +135,15 @@ mod tests {
     fn holders(names: &[&str]) -> Vec<String> { names.iter().map(|s| s.to_string()).collect() }
 
     #[test]
-    fn defaults_admit_the_gui_surfaces_and_nobody_else() {
+    fn defaults_admit_the_gui_and_nobody_else() {
         let r = Roles::default();
-        assert!(custodian_admits("open_wallet", &r.custodians, &m("monero_keys_ui")));
+        assert!(custodian_admits("open_wallet", &r.custodians, &m("monero_wallet_ui")));
         assert!(approver_admits("confirm_send", &r.approvers, &m("monero_wallet_ui")));
-        assert!(!custodian_admits("open_wallet", &r.custodians, &m("monero_wallet_ui")), "the spending surface may not open a wallet");
-        assert!(!approver_admits("confirm_send", &r.approvers, &m("monero_keys_ui")), "the keys surface may not broadcast");
+        // One GUI holds both by default; every other module holds neither until `configure`
+        // says so — including the headless relay, which an operator must enrol on purpose.
+        assert!(!custodian_admits("open_wallet", &r.custodians, &m("monero_wallet_cli")));
+        assert!(!approver_admits("confirm_send", &r.approvers, &m("monero_wallet_cli")));
+        assert!(!custodian_admits("open_wallet", &r.custodians, &m("some_other_module")));
     }
 
     #[test]
@@ -152,20 +161,24 @@ mod tests {
     #[test]
     fn a_method_the_registry_does_not_name_is_refused_even_for_the_holder() {
         let r = Roles::default();
-        assert!(!custodian_admits("balances", &r.custodians, &m("monero_keys_ui")));
-        assert!(!custodian_admits("open_walet", &r.custodians, &m("monero_keys_ui")), "a typo fails closed");
+        assert!(!custodian_admits("balances", &r.custodians, &m("monero_wallet_ui")));
+        assert!(!custodian_admits("open_walet", &r.custodians, &m("monero_wallet_ui")), "a typo fails closed");
         assert!(!approver_admits("prepare_send", &r.approvers, &m("monero_wallet_ui")), "prepare is a request, not an approval");
     }
 
     #[test]
     fn roles_are_sets_and_independent() {
         let mut r = Roles::default();
-        r.configure(r#"{"approvers":["monero_wallet_ui","monero_wallet_cli"],"custodians":"monero_keys_cli"}"#).unwrap();
-        assert!(approver_admits("confirm_send", &r.approvers, &m("monero_wallet_cli")));
+        // The headless relay may hold one role without the other: an operator box that unlocks
+        // at boot but must never broadcast is exactly `custodians` without `approvers`.
+        r.configure(r#"{"approvers":["monero_wallet_ui"],"custodians":["monero_wallet_ui","monero_wallet_cli"]}"#).unwrap();
+        assert!(custodian_admits("open_wallet", &r.custodians, &m("monero_wallet_cli")));
+        assert!(!approver_admits("confirm_send", &r.approvers, &m("monero_wallet_cli")), "a custodian is not thereby an approver");
         assert!(approver_admits("confirm_send", &r.approvers, &m("monero_wallet_ui")));
-        assert!(custodian_admits("open_wallet", &r.custodians, &m("monero_keys_cli")));
-        assert!(!custodian_admits("open_wallet", &r.custodians, &m("monero_keys_ui")), "configure is total: the GUI custodian was not restated");
-        assert!(!custodian_admits("open_wallet", &r.custodians, &m("monero_wallet_cli")), "an approver is not thereby a custodian");
+        r.configure(r#"{"approvers":"monero_wallet_cli"}"#).unwrap();
+        assert!(approver_admits("confirm_send", &r.approvers, &m("monero_wallet_cli")));
+        assert!(!approver_admits("confirm_send", &r.approvers, &m("monero_wallet_ui")), "configure is total: the GUI was not restated");
+        assert!(r.custodians.is_empty(), "a role the document does not name is held by nobody");
     }
 
     #[test]
@@ -176,14 +189,15 @@ mod tests {
         assert!(r.configure(r#"[]"#).is_err());
         r.configure(r#"{}"#).unwrap();
         assert!(r.approvers.is_empty() && r.custodians.is_empty(), "an empty document is 'nobody', by design");
-        assert!(!custodian_admits("open_wallet", &r.custodians, &m("monero_keys_ui")));
+        assert!(!custodian_admits("open_wallet", &r.custodians, &m("monero_wallet_ui")));
     }
 
     #[test]
     fn either_role_may_close_the_session() {
-        let r = Roles::default();
-        assert!(session_admits("close_wallet", &r, &m("monero_keys_ui")));
+        let mut r = Roles::default();
         assert!(session_admits("close_wallet", &r, &m("monero_wallet_ui")));
+        r.configure(r#"{"custodians":"monero_wallet_cli"}"#).unwrap();
+        assert!(session_admits("close_wallet", &r, &m("monero_wallet_cli")), "a custodian alone may end the session");
         assert!(!session_admits("close_wallet", &r, &m("some_other_module")));
         assert!(requester_admits(&m("some_other_module")), "but any named module may ask for a send to be built");
         assert!(!requester_admits(&Caller::Derived { parent: "a".into(), leaf: "b".into() }));
