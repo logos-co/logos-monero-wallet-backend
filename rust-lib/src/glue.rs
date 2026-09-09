@@ -302,6 +302,15 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
             }
             g.settings_path = Some(sp);
         }
+        // Ask-then-initialize the node module: only an `unconfigured` registry licenses a write,
+        // so a device already configured by another app keeps its endpoints (plan §4 / depinit).
+        {
+            let node = modules().monero_node_module;
+            let st: Value = node.config_status().ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
+            if st.get("state").and_then(Value::as_str) == Some("unconfigured") {
+                if let Err(e) = node.init_defaults() { eprintln!("monero_wallet_backend: node init_defaults failed: {e:?}"); }
+            }
+        }
         let inner = Arc::clone(&self.inner);
         let handle = std::thread::spawn(move || {
             let mut n: u64 = 0;
