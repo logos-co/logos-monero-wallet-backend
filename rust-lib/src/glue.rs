@@ -15,20 +15,33 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use crate::gate;
 use crate::model::{format_xmr, is_network, normalize_history, parse_xmr, Registry, SendState, Sends, WalletMeta, NETWORKS};
 
 pub trait MoneroWalletBackendModule: Send + Sync + 'static {
+    /// Name who holds the two roles: `{ approvers?, custodians? }` → `{ ok, approvers, custodians }`.
+    /// TOTAL — a role the document does not name is held by nobody — and in force at once, on a
+    /// module serving the defaults (`monero_keys_ui` custodian, `monero_wallet_ui` approver) since
+    /// it loaded. A malformed document is refused and the roles in force stay.
+    ///
+    /// UNGATED, deliberately and for now — the same standing gap keystore_module documents: any
+    /// caller can name itself custodian. Protecting it is deferred, not refuted.
+    fn configure(&self, config_json: String) -> String;
+    /// `{ ok, kind, identity, approvers, custodians }` — who this call authenticated as, and who
+    /// holds the roles. A headless relay uses it to say exactly which `configure` would admit it.
+    fn caller_identity(&self) -> String;
+
     /// `{ ok, networks: [...], active }`.
     fn list_networks(&self) -> String;
-    /// Refused while a wallet is open or a send is in flight.
+    /// CUSTODIAN. Refused while a wallet is open or a send is in flight.
     fn set_active_network(&self, network: String) -> String;
 
     /// `{ ok, wallets: [{ name, network, label, viewOnly, restoreHeight, address }] }` — the
     /// registry merged with what the engine finds on disk.
     fn list_wallets(&self) -> String;
-    /// Open a registered wallet on the active network. `{ ok, jobId }`; poll job_status.
+    /// CUSTODIAN. Open a registered wallet on the active network. `{ ok, jobId }`; poll job_status.
     fn open_wallet(&self, name: String, password: String) -> String;
-    /// `{ ok, jobId }`. The wallet is registered on the active network.
+    /// CUSTODIAN. `{ ok, jobId }`. The wallet is registered on the active network.
     fn create_wallet(&self, name: String, password: String, label: String) -> String;
     /// `params_json`: `{ name, password, seed, restoreHeight, seedOffset?, label? }` → `{ ok, jobId }`.
     fn restore_from_seed(&self, params_json: String) -> String;
@@ -61,8 +74,11 @@ pub trait MoneroWalletBackendModule: Send + Sync + 'static {
     fn prepare_send(&self, send_json: String) -> String;
     /// `{ ok, requestId, state: preparing|previewed|committing|sent|failed|cancelled, preview?, txids?, error? }`.
     fn send_status(&self, request_id: String) -> String;
-    /// Broadcast a previewed transaction. This governs BROADCAST — the engine already signed
-    /// when it built the preview.
+    /// `{ ok, sends: [{ requestId, state }] }` — every request not yet acked away; what a headless
+    /// approver polls to find previews awaiting a decision.
+    fn list_sends(&self) -> String;
+    /// APPROVER. Broadcast a previewed transaction. This governs BROADCAST — the engine already
+    /// signed when it built the preview.
     fn confirm_send(&self, request_id: String) -> String;
     fn cancel_send(&self, request_id: String) -> String;
 
@@ -111,6 +127,7 @@ struct Inner {
 struct MoneroWalletBackendModuleImpl {
     inner: Arc<Mutex<Inner>>,
     reactor: Mutex<Option<std::thread::JoinHandle<()>>>,
+    roles: Mutex<gate::Roles>,
 }
 
 impl Default for MoneroWalletBackendModuleImpl {
@@ -123,11 +140,24 @@ impl Default for MoneroWalletBackendModuleImpl {
                 node_ready: false,
             })),
             reactor: Mutex::new(None),
+            roles: Mutex::new(gate::Roles::default()),
         }
     }
 }
 
 fn ok(v: Value) -> String { let mut m = v; m["ok"] = json!(true); m.to_string() }
+/// The one opaque refusal. Kept verbatim so a headless relay can recognise and translate it.
+fn not_authorized() -> String { json!({ "ok": false, "error": "not authorized" }).to_string() }
+
+fn caller() -> gate::Caller {
+    match logos_rust_sdk::current_caller() {
+        logos_rust_sdk::LogosCaller::Unknown => gate::Caller::Unknown,
+        logos_rust_sdk::LogosCaller::HostAnchor => gate::Caller::HostAnchor,
+        logos_rust_sdk::LogosCaller::Module { name, .. } => gate::Caller::Module(name),
+        logos_rust_sdk::LogosCaller::Derived { parent, leaf } => gate::Caller::Derived { parent, leaf },
+        logos_rust_sdk::LogosCaller::Operator { name } => gate::Caller::Operator(name),
+    }
+}
 fn err(e: impl std::fmt::Display) -> String { json!({ "ok": false, "error": e.to_string() }).to_string() }
 
 fn core_json(r: Result<Value, LogosError>) -> Result<Value, String> {
@@ -148,6 +178,17 @@ fn unwrap_result(v: Value) -> Result<Value, String> {
 }
 
 impl MoneroWalletBackendModuleImpl {
+    fn may_custody(&self, method: &str) -> bool {
+        gate::custodian_admits(method, &self.roles.lock().unwrap().custodians, &caller())
+    }
+    fn may_approve(&self, method: &str) -> bool {
+        gate::approver_admits(method, &self.roles.lock().unwrap().approvers, &caller())
+    }
+    fn may_end_session(&self, method: &str) -> bool {
+        gate::session_admits(method, &self.roles.lock().unwrap(), &caller())
+    }
+    fn may_request(&self) -> bool { gate::requester_admits(&caller()) }
+
     fn start_core_job(&self, kind: &str, params: Value, wallet: &str, meta: Option<WalletMeta>) -> String {
         let core = modules().monero_wallet_core_module;
         let v = match core_json(core.start_job(kind, &params)).and_then(unwrap_result) {
@@ -324,6 +365,17 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
             }
             g.settings_path = Some(sp);
         }
+        // Roles from `roles.json`, three-state like the keystore: absent → defaults; readable →
+        // use it; present-but-unreadable → both roles emptied, so a torn file refuses rather
+        // than reverting to defaults that admit the GUI.
+        let rp = base.join("roles.json");
+        if rp.exists() {
+            let mut r = self.roles.lock().unwrap();
+            match std::fs::read_to_string(&rp).map_err(|e| e.to_string()).and_then(|t| r.configure(&t)) {
+                Ok(()) => {}
+                Err(e) => { eprintln!("monero_wallet_backend: roles.json unreadable ({e}); both roles emptied"); let _ = r.configure("{}"); }
+            }
+        }
         let inner = Arc::clone(&self.inner);
         let handle = std::thread::spawn(move || {
             let mut n: u64 = 0;
@@ -336,12 +388,38 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
         *self.reactor.lock().unwrap() = Some(handle);
     }
 
+    fn configure(&self, config_json: String) -> String {
+        let mut r = self.roles.lock().unwrap();
+        match r.configure(&config_json) {
+            Ok(()) => json!({ "ok": true, "approvers": r.approvers, "custodians": r.custodians }).to_string(),
+            Err(e) => err(e),
+        }
+    }
+
+    fn caller_identity(&self) -> String {
+        let (kind, name) = match caller() {
+            gate::Caller::Unknown => ("unknown", String::new()),
+            gate::Caller::HostAnchor => ("host", String::new()),
+            gate::Caller::Module(n) => ("module", n),
+            gate::Caller::Derived { parent, leaf } => ("derived", format!("{parent}.{leaf}")),
+            gate::Caller::Operator(n) => ("operator", n),
+        };
+        let r = self.roles.lock().unwrap();
+        json!({ "ok": true, "kind": kind, "identity": name, "approvers": r.approvers, "custodians": r.custodians }).to_string()
+    }
+
+    fn list_sends(&self) -> String {
+        let g = self.inner.lock().unwrap();
+        ok(json!({ "sends": g.sends.all_json() }))
+    }
+
     fn list_networks(&self) -> String {
         let g = self.inner.lock().unwrap();
         ok(json!({ "networks": NETWORKS, "active": g.active }))
     }
 
     fn set_active_network(&self, network: String) -> String {
+        if !self.may_custody("set_active_network") { return not_authorized(); }
         if !is_network(&network) { return err(format!("unknown network: {network}")); }
         let st = modules().monero_wallet_core_module.status().unwrap_or(Value::Null);
         if st.get("state").and_then(Value::as_str).unwrap_or("no_wallet") != "no_wallet" {
@@ -370,6 +448,7 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     }
 
     fn open_wallet(&self, name: String, password: String) -> String {
+        if !self.may_custody("open_wallet") { return not_authorized(); }
         let network = {
             let g = self.inner.lock().unwrap();
             g.registry.get(&name).map(|m| m.network.clone()).unwrap_or_else(|| g.active.clone())
@@ -378,12 +457,14 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     }
 
     fn create_wallet(&self, name: String, password: String, label: String) -> String {
+        if !self.may_custody("create_wallet") { return not_authorized(); }
         let network = self.inner.lock().unwrap().active.clone();
         let meta = WalletMeta { network: network.clone(), label, ..Default::default() };
         self.start_core_job("create_wallet", json!({ "name": name, "password": password, "network": network }), &name, Some(meta))
     }
 
     fn restore_from_seed(&self, params_json: String) -> String {
+        if !self.may_custody("restore_from_seed") { return not_authorized(); }
         let p: Value = match serde_json::from_str(&params_json) { Ok(v) => v, Err(e) => return err(e) };
         let name = p.get("name").and_then(Value::as_str).unwrap_or("").to_string();
         if name.is_empty() { return err("name is required"); }
@@ -397,6 +478,7 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     }
 
     fn restore_from_keys(&self, params_json: String) -> String {
+        if !self.may_custody("restore_from_keys") { return not_authorized(); }
         let p: Value = match serde_json::from_str(&params_json) { Ok(v) => v, Err(e) => return err(e) };
         let name = p.get("name").and_then(Value::as_str).unwrap_or("").to_string();
         if name.is_empty() { return err("name is required"); }
@@ -410,19 +492,25 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
         self.start_core_job("restore_from_keys", params, &name, Some(meta))
     }
 
-    fn close_wallet(&self) -> String { self.start_core_job("close_wallet", json!({}), "", None) }
+    fn close_wallet(&self) -> String {
+        if !self.may_end_session("close_wallet") { return not_authorized(); }
+        self.start_core_job("close_wallet", json!({}), "", None)
+    }
 
     fn change_password(&self, old_password: String, new_password: String) -> String {
+        if !self.may_custody("change_password") { return not_authorized(); }
         self.start_core_job("change_password", json!({ "oldPassword": old_password, "newPassword": new_password }), "", None)
     }
 
     fn reveal_seed(&self, password: String) -> String {
+        if !self.may_custody("reveal_seed") { return not_authorized(); }
         match core_json(modules().monero_wallet_core_module.reveal_seed(&password)).and_then(unwrap_result) {
             Ok(v) => ok(v), Err(e) => err(e),
         }
     }
 
     fn reveal_view_key(&self, password: String) -> String {
+        if !self.may_custody("reveal_view_key") { return not_authorized(); }
         match core_json(modules().monero_wallet_core_module.reveal_view_key(&password)).and_then(unwrap_result) {
             Ok(v) => ok(v), Err(e) => err(e),
         }
@@ -488,6 +576,7 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     }
 
     fn prepare_send(&self, send_json: String) -> String {
+        if !self.may_request() { return not_authorized(); }
         let p: Value = match serde_json::from_str(&send_json) { Ok(v) => v, Err(e) => return err(e) };
         let amount = match (p.get("amountXmr").and_then(Value::as_str), p.get("amount").and_then(Value::as_str)) {
             (Some(x), _) => match parse_xmr(x) { Some(a) => a, None => return err("amountXmr is not a valid XMR amount (max 12 decimals)") },
@@ -517,6 +606,7 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     }
 
     fn confirm_send(&self, request_id: String) -> String {
+        if !self.may_approve("confirm_send") { return not_authorized(); }
         let handle = {
             let mut g = self.inner.lock().unwrap();
             let Some(s) = g.sends.get_mut(&request_id) else { return err("unknown requestId") };
@@ -530,6 +620,7 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     }
 
     fn cancel_send(&self, request_id: String) -> String {
+        if !self.may_request() { return not_authorized(); }
         let handle = {
             let mut g = self.inner.lock().unwrap();
             let Some(s) = g.sends.get_mut(&request_id) else { return err("unknown requestId") };

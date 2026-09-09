@@ -7,6 +7,7 @@
 //!
 //! The pure core ([`model`]) is unit-tested with `cargo test --no-default-features`; the
 //! Logos glue is behind the default `logos_module` feature.
+pub mod gate;
 pub mod model;
 
 #[cfg(feature = "logos_module")]

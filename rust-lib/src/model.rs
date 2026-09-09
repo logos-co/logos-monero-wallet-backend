@@ -213,6 +213,10 @@ impl Sends {
         expired
     }
 
+    pub fn all_json(&self) -> Value {
+        self.reqs.values().map(|r| json!({ "requestId": r.request_id, "state": r.state.name() })).collect()
+    }
+
     pub fn status_json(&self, id: &str) -> Value {
         match self.reqs.get(id) {
             None => json!({ "ok": false, "error": "unknown requestId" }),
