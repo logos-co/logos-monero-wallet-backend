@@ -1,0 +1,23 @@
+name: monero_wallet_backend Unit Tests
+on:
+  pull_request: { branches: [master, main] }
+  push: { branches: [master, main] }
+concurrency: { group: unit-tests-${{ github.ref }}, cancel-in-progress: true }
+jobs:
+  cargo-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { toolchain: "1.89" }
+      - uses: actions/checkout@v4
+        with: { repository: logos-co/logos-rust-sdk, path: logos-rust-sdk-src }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: rust-lib }
+      - run: cargo test --manifest-path rust-lib/Cargo.toml --no-default-features --locked
+      - name: The money-safety guards must be present
+        run: |
+          out=$(cargo test --manifest-path rust-lib/Cargo.toml --no-default-features --locked -- --list)
+          for t in parse_round_trips_and_refuses_precision_loss only_one_send_in_flight_at_a_time a_stale_preview_expires_instead_of_committing; do
+            echo "$out" | grep -q "$t" || { echo "MISSING guard test: $t"; exit 1; }
+          done
