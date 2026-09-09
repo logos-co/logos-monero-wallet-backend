@@ -105,6 +105,7 @@ struct Inner {
     last_state: String,
     last_sync: Value,
     last_balance: (String, String),
+    node_ready: bool,
 }
 
 struct MoneroWalletBackendModuleImpl {
@@ -119,6 +120,7 @@ impl Default for MoneroWalletBackendModuleImpl {
                 registry: Registry::new(None), settings_path: None, active: "stagenet".into(),
                 jobs: HashMap::new(), next_job: 1, sends: Sends::default(),
                 last_state: String::new(), last_sync: Value::Null, last_balance: (String::new(), String::new()),
+                node_ready: false,
             })),
             reactor: Mutex::new(None),
         }
@@ -173,8 +175,28 @@ impl MoneroWalletBackendModuleImpl {
         }
     }
 
+    /// Ask-then-initialize the node module: only an `unconfigured` registry licenses a write, so a
+    /// device another app already configured keeps its endpoints. Runs from the reactor rather than
+    /// `on_context_ready` — a call made there arrives before the token handshake has settled and is
+    /// rejected ("auth token not recognized", measured in the standalone host) — and repeats until
+    /// the node module answers, so one refused call cannot leave the registry empty for the session.
+    fn ensure_node_initialised(inner: &Arc<Mutex<Inner>>) {
+        if inner.lock().unwrap().node_ready { return; }
+        let node = modules().monero_node_module;
+        let Ok(raw) = node.config_status() else { return };
+        let st: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+        match st.get("state").and_then(Value::as_str) {
+            Some("unconfigured") => {
+                if node.init_defaults().is_ok() { inner.lock().unwrap().node_ready = true; }
+            }
+            Some("configured") => inner.lock().unwrap().node_ready = true,
+            _ => {}
+        }
+    }
+
     /// One reactor turn: advance tracked jobs, then sync/balance, then send expiry.
     fn reactor_tick(inner: &Arc<Mutex<Inner>>, slow: bool) {
+        Self::ensure_node_initialised(inner);
         let core = modules().monero_wallet_core_module;
 
         // 1) Tracked jobs.
@@ -301,15 +323,6 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
                 }
             }
             g.settings_path = Some(sp);
-        }
-        // Ask-then-initialize the node module: only an `unconfigured` registry licenses a write,
-        // so a device already configured by another app keeps its endpoints (plan §4 / depinit).
-        {
-            let node = modules().monero_node_module;
-            let st: Value = node.config_status().ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
-            if st.get("state").and_then(Value::as_str) == Some("unconfigured") {
-                if let Err(e) = node.init_defaults() { eprintln!("monero_wallet_backend: node init_defaults failed: {e:?}"); }
-            }
         }
         let inner = Arc::clone(&self.inner);
         let handle = std::thread::spawn(move || {
