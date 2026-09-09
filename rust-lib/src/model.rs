@@ -148,6 +148,10 @@ pub enum SendState {
     Sent,
     Failed(String),
     Cancelled,
+    /// The engine stopped while broadcasting. Whether the transaction reached the network is
+    /// genuinely not knowable from here — "failed" would claim nothing was sent, and that is a
+    /// claim this module cannot make about someone's money.
+    Unknown(String),
 }
 
 impl SendState {
@@ -159,10 +163,11 @@ impl SendState {
             SendState::Sent => "sent",
             SendState::Failed(_) => "failed",
             SendState::Cancelled => "cancelled",
+            SendState::Unknown(_) => "unknown",
         }
     }
     pub fn terminal(&self) -> bool {
-        matches!(self, SendState::Sent | SendState::Failed(_) | SendState::Cancelled)
+        matches!(self, SendState::Sent | SendState::Failed(_) | SendState::Cancelled | SendState::Unknown(_))
     }
 }
 
@@ -231,7 +236,10 @@ impl Sends {
             Some(r) => json!({
                 "ok": true, "requestId": r.request_id, "state": r.state.name(),
                 "preview": r.preview, "txids": r.txids,
-                "error": match &r.state { SendState::Failed(e) => Some(e.clone()), _ => None },
+                "error": match &r.state {
+                    SendState::Failed(e) | SendState::Unknown(e) => Some(e.clone()),
+                    _ => None,
+                },
             }),
         }
     }
@@ -331,6 +339,22 @@ mod tests {
         assert!(s.begin(json!({})).is_err(), "second prepare must be refused while the first is open");
         s.get_mut(&a).unwrap().state = SendState::Cancelled;
         assert!(s.begin(json!({})).is_ok());
+    }
+
+    #[test]
+    fn an_engine_that_dies_mid_broadcast_is_unknown_not_failed() {
+        // The distinction is the whole point: "failed" tells the user nothing was sent, which
+        // is a claim nobody can make once commit() has been entered and the process is gone.
+        let mut s = Sends::default();
+        let rid = s.begin(json!({ "address": "5B", "amount": "1" })).unwrap();
+        s.get_mut(&rid).unwrap().state = SendState::Unknown("engine stopped while broadcasting".into());
+        let st = s.status_json(&rid);
+        assert_eq!(st["state"], "unknown");
+        assert_eq!(st["error"], "engine stopped while broadcasting", "the reason must reach the surface");
+        assert!(s.get(&rid).unwrap().state.terminal(), "it is settled: nothing will move it now");
+        // And it does not read as either success or failure.
+        assert_ne!(st["state"], "sent");
+        assert_ne!(st["state"], "failed");
     }
 
     #[test]

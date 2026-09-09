@@ -120,6 +120,9 @@ struct TrackedJob {
     error: String,
     wallet: String,
     meta: Option<WalletMeta>,
+    /// Consecutive ticks the engine could not be reached. A crashed module never answers, and
+    /// polling it forever is what left a send sitting on "committing" with no explanation.
+    misses: u32,
 }
 
 struct Inner {
@@ -214,6 +217,7 @@ impl MoneroWalletBackendModuleImpl {
         g.jobs.insert(jid.clone(), TrackedJob {
             kind: kind.into(), core: (id.into(), receipt.into()), state: "queued".into(),
             result: Value::Null, error: String::new(), wallet: wallet.into(), meta,
+            misses: 0,
         });
         ok(json!({ "jobId": jid }))
     }
@@ -247,6 +251,46 @@ impl MoneroWalletBackendModuleImpl {
     }
 
     /// One reactor turn: advance tracked jobs, then sync/balance, then send expiry.
+    /// The engine did not answer. After a few consecutive misses it is not coming back on its
+    /// own, so settle the job rather than leaving the surface on a spinner forever.
+    fn note_engine_miss(inner: &Arc<Mutex<Inner>>, jid: &str) {
+        const GIVE_UP_AFTER: u32 = 5;   // ~5 s of reactor ticks
+        let mut g = inner.lock().unwrap();
+        let Some(job) = g.jobs.get_mut(jid) else { return };
+        job.misses += 1;
+        if job.misses < GIVE_UP_AFTER { return; }
+        let kind = job.kind.clone();
+        let rid = job.wallet.clone();
+        job.state = "failed".into();
+        job.error = "the wallet engine stopped responding".into();
+        if kind == "commit_transaction" {
+            // The one case where "failed" would be a lie: the engine may have relayed the
+            // transaction before it died. Say what is actually known.
+            let msg = "the wallet engine stopped while broadcasting. The transaction may or may \
+                       not have reached the network — reopen the wallet and check Activity \
+                       before sending again";
+            job.error = msg.into();
+            if let Some(s) = g.sends.get_mut(&rid) {
+                s.state = SendState::Unknown(msg.into());
+            }
+            drop(g);
+            emit_send_status_changed(&rid, "unknown");
+            emit_job_finished(jid, "failed");
+            return;
+        }
+        if kind == "create_transaction" {
+            if let Some(s) = g.sends.get_mut(&rid) {
+                s.state = SendState::Failed("the wallet engine stopped while building".into());
+            }
+            drop(g);
+            emit_send_status_changed(&rid, "failed");
+            emit_job_finished(jid, "failed");
+            return;
+        }
+        drop(g);
+        emit_job_finished(jid, "failed");
+    }
+
     fn reactor_tick(inner: &Arc<Mutex<Inner>>, slow: bool) {
         Self::ensure_node_initialised(inner);
         let core = modules().monero_wallet_core_module;
@@ -258,7 +302,18 @@ impl MoneroWalletBackendModuleImpl {
                 .map(|(id, j)| (id.clone(), j.core.clone())).collect()
         };
         for (jid, (cid, receipt)) in pending {
-            let st = core.job_status(&cid, &receipt).unwrap_or(Value::Null);
+            // Distinguish "the engine has not finished" from "the engine is not there".
+            let reply = core.job_status(&cid, &receipt);
+            let reachable = reply.is_ok();
+            let st = reply.unwrap_or(Value::Null);
+            if !reachable {
+                Self::note_engine_miss(inner, &jid);
+                continue;
+            }
+            {
+                let mut g = inner.lock().unwrap();
+                if let Some(j) = g.jobs.get_mut(&jid) { j.misses = 0; }
+            }
             let state = st.get("state").and_then(Value::as_str).unwrap_or("").to_string();
             if state == "done" || state == "failed" {
                 let outcome = if state == "done" {
