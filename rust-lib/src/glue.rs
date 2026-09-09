@@ -64,11 +64,21 @@ pub trait MoneroWalletBackendModule: Send + Sync + 'static {
     /// `{ ok, address, subaddresses: [{ index, address, label }] }`.
     fn receive_info(&self, account_index: i64) -> String;
     fn create_subaddress(&self, account_index: i64, label: String) -> String;
+    /// Rename a subaddress, or clear the label with an empty string. `{ ok, index, label }`.
+    fn set_subaddress_label(&self, account_index: i64, address_index: i64, label: String) -> String;
     /// `{ ok, rows: [...] }`, newest first, amounts as decimal strings + XMR strings.
     fn history(&self) -> String;
     fn address_valid(&self, address: String) -> bool;
     /// The node module's health for the active network.
     fn node_health(&self) -> String;
+    /// The active network's node config, with the RPC password REDACTED to `hasPassword`.
+    /// A wallet surface needs to know a password is set, never what it is.
+    fn node_config(&self) -> String;
+    /// CUSTODIAN. Point the active network at a different daemon.
+    /// `{ url, username?, password?, proxy?, proxyRequired?, trusted? }` — omitting `password`
+    /// KEEPS the stored one; send `""` to clear it. Refused while a wallet is open, because
+    /// wallet2 binds its daemon at init.
+    fn set_node_config(&self, config_json: String) -> String;
 
     /// Build a transaction for review. `send_json`: `{ address, amountXmr | amount, priority?, accountIndex? }`.
     /// `{ ok, requestId }`; poll send_status for the preview. At most one send in flight.
@@ -561,6 +571,14 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
         }
     }
 
+    fn set_subaddress_label(&self, account_index: i64, address_index: i64, label: String) -> String {
+        match core_json(modules().monero_wallet_core_module.set_subaddress_label(account_index, address_index, &label))
+            .and_then(unwrap_result)
+        {
+            Ok(v) => ok(v), Err(e) => err(e),
+        }
+    }
+
     fn history(&self) -> String {
         let rows = modules().monero_wallet_core_module.history().unwrap_or(json!([]));
         ok(json!({ "rows": normalize_history(&rows) }))
@@ -574,6 +592,61 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     fn node_health(&self) -> String {
         let network = self.inner.lock().unwrap().active.clone();
         modules().monero_node_module.node_health(&network).unwrap_or_else(|e| err(format!("node module: {e:?}")))
+    }
+
+    fn node_config(&self) -> String {
+        let network = self.inner.lock().unwrap().active.clone();
+        let raw = match modules().monero_node_module.get_node_config(&network) {
+            Ok(s) => s,
+            Err(e) => return err(format!("node module: {e:?}")),
+        };
+        let v: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+        if v.get("ok").and_then(Value::as_bool) != Some(true) {
+            return raw;
+        }
+        let mut cfg = v.get("result").cloned().unwrap_or(json!({}));
+        // Redact rather than forward: the daemon RPC password is not this surface's business,
+        // and a PROP carrying it would be cached and broadcast to every replica.
+        let had = cfg.get("password").and_then(Value::as_str).map(|s| !s.is_empty()).unwrap_or(false);
+        if let Some(o) = cfg.as_object_mut() {
+            o.remove("password");
+            o.insert("hasPassword".into(), json!(had));
+            o.insert("network".into(), json!(network));
+        }
+        ok(cfg)
+    }
+
+    fn set_node_config(&self, config_json: String) -> String {
+        if !self.may_custody("set_node_config") { return not_authorized(); }
+        let network = self.inner.lock().unwrap().active.clone();
+        // wallet2 binds its daemon address at Wallet_init, so switching under an open wallet
+        // would leave the engine talking to the old node while the config says otherwise.
+        let state = modules().monero_wallet_core_module.status().ok()
+            .and_then(|s| s.get("state").and_then(|v| v.as_str().map(str::to_string)))
+            .unwrap_or_default();
+        if state != "no_wallet" && !state.is_empty() && state != "failed" {
+            return err("close the wallet before changing the node");
+        }
+        let mut incoming: Value = match serde_json::from_str(&config_json) {
+            Ok(v) => v,
+            Err(e) => return err(format!("bad config: {e}")),
+        };
+        if !incoming.is_object() { return err("config must be an object"); }
+        // Carry the stored password forward unless the caller states a new one: the UI never
+        // reads it back (node_config redacts), so it cannot echo it here.
+        if incoming.get("password").is_none() {
+            if let Ok(raw) = modules().monero_node_module.get_node_config(&network) {
+                if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+                    if let Some(p) = v.get("result").and_then(|r| r.get("password")).cloned() {
+                        if let Some(o) = incoming.as_object_mut() { o.insert("password".into(), p); }
+                    }
+                }
+            }
+        }
+        match modules().monero_node_module.set_node_config(&network, &incoming.to_string()) {
+            Ok(s) => s,
+            Err(e) => err(format!("node module: {e:?}")),
+        }
     }
 
     fn prepare_send(&self, send_json: String) -> String {

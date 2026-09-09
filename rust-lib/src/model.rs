@@ -118,6 +118,14 @@ pub fn normalize_history(rows: &Value) -> Value {
             "failed": r.get("failed").cloned().unwrap_or(json!(false)),
             "unlockTime": r.get("unlockTime").cloned().unwrap_or(json!(0)),
             "account": r.get("account").cloned().unwrap_or(json!(0)),
+            // Detail the row does not show but the expanded view does. `destinations` is empty
+            // for an incoming transfer — wallet2 records them only for transfers we made — and
+            // the view must say "not recorded" rather than implying the sender is unknown.
+            "paymentId": r.get("paymentId").cloned().unwrap_or(json!("")),
+            "description": r.get("description").cloned().unwrap_or(json!("")),
+            "subaddrIndex": r.get("subaddrIndex").cloned().unwrap_or(json!("")),
+            "coinbase": r.get("coinbase").cloned().unwrap_or(json!(false)),
+            "destinations": r.get("destinations").cloned().unwrap_or(json!([])),
         })
     }).collect();
     // Newest first; a pending row (height 0) sorts to the top.
@@ -268,6 +276,39 @@ mod tests {
         assert!(!text.contains("password") && !text.contains("seed"));
         let r = Registry::new(Some(p));
         assert_eq!(r.get("main").unwrap().network, "stagenet");
+    }
+
+    #[test]
+    fn history_carries_every_detail_the_expanded_row_shows() {
+        // The engine reports these; normalize_history used to drop them on the floor, so the
+        // Activity detail had nothing to render. An incoming transfer has NO destinations —
+        // wallet2 records them only for transfers this wallet made — and that must survive as
+        // an empty list rather than becoming null.
+        let rows = json!([{
+            "txid": "a1", "direction": "in", "amount": "100000000000", "fee": "0",
+            "height": 10, "confirmations": 2, "timestamp": 1788900000,
+            "paymentId": "pid7", "description": "rent", "subaddrIndex": "1",
+            "coinbase": false, "destinations": []
+        }, {
+            "txid": "b2", "direction": "out", "amount": "50000000000", "fee": "30000000",
+            "height": 11, "confirmations": 1, "timestamp": 1788900100,
+            "destinations": [{ "address": "58hpB", "amount": "50000000000" }]
+        }]);
+        let out = normalize_history(&rows);
+        let a = out.as_array().unwrap();
+        let incoming = a.iter().find(|r| r["txid"] == "a1").unwrap();
+        assert_eq!(incoming["paymentId"], "pid7");
+        assert_eq!(incoming["description"], "rent");
+        assert_eq!(incoming["subaddrIndex"], "1");
+        assert_eq!(incoming["amountXmr"], "0.100000000000");
+        assert!(incoming["destinations"].as_array().unwrap().is_empty(), "an incoming transfer records no destination");
+        let outgoing = a.iter().find(|r| r["txid"] == "b2").unwrap();
+        assert_eq!(outgoing["destinations"][0]["address"], "58hpB");
+        assert_eq!(outgoing["feeXmr"], "0.000030000000", "30000000 atomic units is 0.00003 XMR — 1 XMR is 1e12");
+        // Absent fields become empty, never null: the view renders "—" from an empty string.
+        assert_eq!(outgoing["paymentId"], "");
+        assert_eq!(outgoing["description"], "");
+        assert_eq!(outgoing["coinbase"], false);
     }
 
     #[test]
