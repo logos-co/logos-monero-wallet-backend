@@ -6,11 +6,11 @@
     # Local paths until the repos are published (P8 switches these to github:). Every
     # dependency follows THIS module-builder: a skewed generated ABI segfaults in provider init.
     monero_node_module = {
-      url = "path:/Users/dlipicar/repos/logos-monero-node-module";
+      url = "github:logos-co/logos-monero-node-module";
       inputs.logos-module-builder.follows = "logos-module-builder";
     };
     monero_wallet_core_module = {
-      url = "path:/Users/dlipicar/repos/logos-monero-wallet-core-module";
+      url = "github:logos-co/logos-monero-wallet-core-module";
       inputs.logos-module-builder.follows = "logos-module-builder";
       inputs.monero_node_module.follows = "monero_node_module";
     };
