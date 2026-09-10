@@ -316,8 +316,13 @@ impl MoneroWalletBackendModuleImpl {
             }
             let state = st.get("state").and_then(Value::as_str).unwrap_or("").to_string();
             if state == "done" || state == "failed" {
+                // Distinguish "the engine says it failed" from "the engine says done and we
+                // could not read the result". For a commit those mean opposite things.
+                let mut result_unreadable = false;
                 let outcome = if state == "done" {
-                    core_json(core.job_result(&cid, &receipt)).and_then(unwrap_result)
+                    let r = core_json(core.job_result(&cid, &receipt)).and_then(unwrap_result);
+                    if r.is_err() { result_unreadable = true; }
+                    r
                 } else {
                     Err(st.get("error").and_then(Value::as_str).unwrap_or("job failed").to_string())
                 };
@@ -357,8 +362,13 @@ impl MoneroWalletBackendModuleImpl {
                                         "txCount": res.get("txCount").cloned().unwrap_or(json!(1)),
                                         "txids": res.get("txids").cloned().unwrap_or(json!("")),
                                     }));
-                                    s.state = SendState::Previewed;
-                                    s.prepared_at = Some(Instant::now());
+                                    // Only advance a send that is still waiting for this build.
+                                    // A user who cancelled while it was preparing must not have
+                                    // it silently reappear as spendable.
+                                    if s.state == SendState::Preparing {
+                                        s.state = SendState::Previewed;
+                                        s.prepared_at = Some(Instant::now());
+                                    }
                                 } else {
                                     s.txids = res.get("txids").and_then(Value::as_str).map(String::from);
                                     s.state = SendState::Sent;
@@ -373,8 +383,19 @@ impl MoneroWalletBackendModuleImpl {
                         final_state = "failed";
                         if kind == "create_transaction" || kind == "commit_transaction" {
                             let rid = wallet.clone();
-                            if let Some(s) = g.sends.get_mut(&rid) { s.state = SendState::Failed(e.clone()); }
-                            emit_send_status_changed(&rid, "failed");
+                            // The engine reported DONE and only the result fetch failed: for a
+                            // commit that means it relayed and we cannot read the txid. Calling
+                            // that "failed" would tell the user nothing was sent.
+                            let unknown = kind == "commit_transaction" && result_unreadable;
+                            let st = if unknown {
+                                SendState::Unknown("the engine broadcast this but its result could not be read \
+                                                    — check Activity before sending again".into())
+                            } else {
+                                SendState::Failed(e.clone())
+                            };
+                            let name = st.name().to_string();
+                            if let Some(s) = g.sends.get_mut(&rid) { s.state = st; }
+                            emit_send_status_changed(&rid, &name);
                         }
                         if let Some(j) = g.jobs.get_mut(&jid) { j.state = "failed".into(); j.error = e; }
                     }
@@ -607,8 +628,12 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
 
     fn balances(&self, account_index: i64) -> String {
         let core = modules().monero_wallet_core_module;
-        let b = core.balance(account_index).unwrap_or_else(|_| "0".into());
-        let u = core.unlocked_balance(account_index).unwrap_or_else(|_| "0".into());
+        // A failed read is NOT a zero balance, and the engine answers "" while it is busy
+        // building. Either way, refuse rather than invent a number about someone's money.
+        let (Ok(b), Ok(u)) = (core.balance(account_index), core.unlocked_balance(account_index)) else {
+            return err("the wallet engine did not answer");
+        };
+        if b.is_empty() || u.is_empty() { return err("the wallet is busy"); }
         ok(json!({ "balance": b, "unlocked": u,
                    "balanceXmr": format_xmr(&b).unwrap_or_default(), "unlockedXmr": format_xmr(&u).unwrap_or_default() }))
     }
@@ -635,8 +660,12 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     }
 
     fn history(&self) -> String {
-        let rows = modules().monero_wallet_core_module.history().unwrap_or(json!([]));
-        ok(json!({ "rows": normalize_history(&rows) }))
+        // "no rows" and "could not ask" are different answers; only one of them is
+        // "No transactions yet." on the user's screen.
+        match modules().monero_wallet_core_module.history() {
+            Ok(rows) => ok(json!({ "rows": normalize_history(&rows) })),
+            Err(_) => err("the wallet engine did not answer"),
+        }
     }
 
     fn address_valid(&self, address: String) -> bool {
@@ -745,7 +774,23 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
             h
         };
         emit_send_status_changed(&request_id, "committing");
-        self.start_core_job("commit_transaction", json!({ "txHandle": handle }), &request_id, None)
+        let reply = self.start_core_job("commit_transaction", json!({ "txHandle": handle }), &request_id, None);
+        // If the engine was never reached, nothing was broadcast and the send must not be left
+        // on "committing" forever — that wedges every future send for the life of the process.
+        // The engine may also have died mid-call, so this is Unknown, not Failed.
+        if serde_json::from_str::<Value>(&reply).ok()
+            .and_then(|v| v.get("ok").and_then(Value::as_bool)) != Some(true)
+        {
+            let msg = "the wallet engine could not be reached to broadcast. Check Activity \
+                       before sending again";
+            let mut g = self.inner.lock().unwrap();
+            if let Some(s) = g.sends.get_mut(&request_id) {
+                if s.state == SendState::Committing { s.state = SendState::Unknown(msg.into()); }
+            }
+            drop(g);
+            emit_send_status_changed(&request_id, "unknown");
+        }
+        reply
     }
 
     fn cancel_send(&self, request_id: String) -> String {
