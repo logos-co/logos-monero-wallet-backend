@@ -1,23 +1,69 @@
 name: monero_wallet_backend Unit Tests
+
+# The money model and the role gate, run on every change. `--no-default-features` drops the
+# logos_module glue (and the logos-rust-sdk path dep), so this is plain cargo — no nix, no SDK
+# build, no network beyond crates.io. ci.yml is the nix half; without it nothing here would
+# build the module at all.
+#
+# This file was flow-style YAML until now and had NEVER parsed: `${{ github.ref }}` inside a
+# `{ ... }` flow mapping closes it early, so every run since the repo was created failed in 0s
+# with "a workflow file issue" and these tests ran nowhere. Block style, deliberately.
+
 on:
-  pull_request: { branches: [master, main] }
-  push: { branches: [master, main] }
-concurrency: { group: unit-tests-${{ github.ref }}, cancel-in-progress: true }
+  pull_request:
+    branches: [master, main]
+  push:
+    branches: [master, main]
+
+concurrency:
+  group: unit-tests-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   cargo-test:
+    name: cargo test (pure core)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with: { toolchain: "1.89" }
-      - uses: actions/checkout@v4
-        with: { repository: logos-co/logos-rust-sdk, path: logos-rust-sdk-src }
+
+      - name: Install the pinned toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.89"
+
+      - name: Provide the SDK manifest cargo insists on resolving
+        # --no-default-features never COMPILES the SDK, but cargo still resolves the manifest of
+        # the optional path dep, and logos-rust-sdk-src is gitignored (the nix builder stages it).
+        uses: actions/checkout@v4
+        with:
+          repository: logos-co/logos-rust-sdk
+          path: logos-rust-sdk-src
+
       - uses: Swatinem/rust-cache@v2
-        with: { workspaces: rust-lib }
-      - run: cargo test --manifest-path rust-lib/Cargo.toml --no-default-features --locked
-      - name: The money-safety guards must be present
+        with:
+          workspaces: rust-lib
+
+      - name: cargo test --no-default-features
+        run: cargo test --manifest-path rust-lib/Cargo.toml --no-default-features --locked
+
+      - name: The money-safety and role guards must actually be present
+        # A suite that silently stops compiling reads as coverage. Assert the load-bearing tests
+        # by name: the two that decide whether a transaction can be lost or duplicated, the one
+        # that keeps an unknown outcome from being reported as a failure, and the four that hold
+        # the role gate's shape.
         run: |
+          set -euo pipefail
           out=$(cargo test --manifest-path rust-lib/Cargo.toml --no-default-features --locked -- --list)
-          for t in parse_round_trips_and_refuses_precision_loss only_one_send_in_flight_at_a_time a_stale_preview_expires_instead_of_committing; do
-            echo "$out" | grep -q "$t" || { echo "MISSING guard test: $t"; exit 1; }
+          echo "$out"
+          for t in parse_round_trips_and_refuses_precision_loss \
+                   format_is_exact_to_twelve_places \
+                   only_one_send_in_flight_at_a_time \
+                   a_stale_preview_expires_instead_of_committing \
+                   an_engine_that_dies_mid_broadcast_is_unknown_not_failed \
+                   registry_round_trips_and_never_holds_a_secret \
+                   roles_are_sets_and_independent \
+                   the_host_anchor_is_refused_everywhere_however_roles_are_set \
+                   a_method_the_registry_does_not_name_is_refused_even_for_the_holder \
+                   configure_is_total_and_refuses_unknown_keys; do
+            echo "$out" | grep -q "$t" || { echo "::error::MISSING guard test: $t"; exit 1; }
           done
