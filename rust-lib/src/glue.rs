@@ -60,6 +60,8 @@ pub trait MoneroWalletBackendModule: Send + Sync + 'static {
     /// The engine's status plus `syncPercent` and the registry's meta for the open wallet.
     fn wallet_status(&self) -> String;
     /// `{ ok, balance, unlocked, balanceXmr, unlockedXmr }` — atomic units as decimal strings.
+    /// A read the engine could not serve answers `{ ok: false, busy: true }` while it is building
+    /// or committing: unread, not zero, and not a failure a poller should report.
     fn balances(&self, account_index: i64) -> String;
     /// `{ ok, address, subaddresses: [{ index, address, label }] }`.
     fn receive_info(&self, account_index: i64) -> String;
@@ -616,9 +618,12 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     fn wallet_status(&self) -> String {
         let mut st = modules().monero_wallet_core_module.status().unwrap_or(json!({ "state": "unavailable" }));
         let g = self.inner.lock().unwrap();
-        let wh = st.get("walletHeight").and_then(Value::as_u64).unwrap_or(0);
-        let dh = st.get("daemonHeight").and_then(Value::as_u64).unwrap_or(0);
-        st["syncPercent"] = json!(if dh == 0 { 0 } else { ((wh.min(dh) as u128 * 100) / dh as u128) as u64 });
+        // Only when the engine answered with heights. A busy engine sends none at all, and a
+        // percentage derived from their absence is a claim about a chain nobody read.
+        if let (Some(wh), Some(dh)) = (st.get("walletHeight").and_then(Value::as_u64),
+                                       st.get("daemonHeight").and_then(Value::as_u64)) {
+            st["syncPercent"] = json!(if dh == 0 { 0 } else { ((wh.min(dh) as u128 * 100) / dh as u128) as u64 });
+        }
         st["activeNetwork"] = json!(g.active);
         if let Some(n) = st.get("wallet").and_then(Value::as_str) {
             if let Some(m) = g.registry.get(n) { st["meta"] = serde_json::to_value(m).unwrap_or(Value::Null); }
@@ -633,7 +638,11 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
         let (Ok(b), Ok(u)) = (core.balance(account_index), core.unlocked_balance(account_index)) else {
             return err("the wallet engine did not answer");
         };
-        if b.is_empty() || u.is_empty() { return err("the wallet is busy"); }
+        // Busy is "not read", not a failure: a build holds the wallet lock for ~15 s, and a
+        // caller polling behind it would otherwise stack one error line per poll.
+        if b.is_empty() || u.is_empty() {
+            return json!({ "ok": false, "busy": true, "error": "the wallet is busy" }).to_string();
+        }
         ok(json!({ "balance": b, "unlocked": u,
                    "balanceXmr": format_xmr(&b).unwrap_or_default(), "unlockedXmr": format_xmr(&u).unwrap_or_default() }))
     }
