@@ -76,10 +76,12 @@ pub trait MoneroWalletBackendModule: Send + Sync + 'static {
     /// The active network's node config, with the RPC password REDACTED to `hasPassword`.
     /// A wallet surface needs to know a password is set, never what it is.
     fn node_config(&self) -> String;
+    /// Whether monerod_module can serve the active network: `{ ok, available, rpcUrl?, status?, error? }`.
+    fn local_node(&self) -> String;
     /// CUSTODIAN. Point the active network at a different daemon.
-    /// `{ url, username?, password?, proxy?, proxyRequired?, trusted? }` — omitting `password`
-    /// KEEPS the stored one; send `""` to clear it. Refused while a wallet is open, because
-    /// wallet2 binds its daemon at init.
+    /// `{ url, username?, password?, proxy?, proxyRequired?, trusted?, mode? }` — omitting `password`
+    /// KEEPS the stored one; send `""` to clear it. `mode` is `remote` unless it says `local`.
+    /// Refused while a wallet is open, because wallet2 binds its daemon at init.
     fn set_node_config(&self, config_json: String) -> String;
 
     /// Build a transaction for review. `send_json`: `{ address, amountXmr | amount, priority?, accountIndex? }`.
@@ -707,6 +709,11 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
             o.insert("network".into(), json!(network));
         }
         ok(cfg)
+    }
+
+    fn local_node(&self) -> String {
+        let network = self.inner.lock().unwrap().active.clone();
+        modules().monero_node_module.local_node(&network).unwrap_or_else(|e| err(format!("node module: {e:?}")))
     }
 
     fn set_node_config(&self, config_json: String) -> String {
