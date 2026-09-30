@@ -5,6 +5,11 @@ surfaces (one GUI, one headless CLI) and the engine (`monero_wallet_core_module`
 engine's tickets, polls sync and balances into events, normalises history, and orchestrates a
 send as **build → review → broadcast**. It holds no key material and caches no password.
 
+The selected network governs opening a wallet: a registered Stagenet wallet cannot open while
+Mainnet is selected. Files discovered on disk have an unknown network until successfully opened;
+the registry does not infer a network from the current selector. Open-wallet status, node information,
+and address validation use the engine's wallet network.
+
 Amounts are decimal strings of atomic units (1 XMR = 1e12); `format_xmr` / `parse_xmr` are
 exact (no floating point) and `parse_xmr` refuses more than 12 fractional digits rather than
 rounding. At most one send is in flight per wallet — a built transaction reserves nothing,
