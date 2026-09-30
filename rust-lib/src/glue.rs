@@ -51,6 +51,8 @@ pub trait MoneroWalletBackendModule: Send + Sync + 'static {
     /// `{ ok, jobId }`.
     fn close_wallet(&self) -> String;
     fn change_password(&self, old_password: String, new_password: String) -> String;
+    /// CUSTODIAN. Recheck spent outputs with the trusted local node. `{ ok, jobId }`.
+    fn rescan_spent(&self) -> String;
     /// Pass-through to the engine, which re-checks the password. Never cached here.
     fn reveal_seed(&self, password: String) -> String;
     fn reveal_view_key(&self, password: String) -> String;
@@ -591,6 +593,11 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     fn change_password(&self, old_password: String, new_password: String) -> String {
         if !self.may_custody("change_password") { return not_authorized(); }
         self.start_core_job("change_password", json!({ "oldPassword": old_password, "newPassword": new_password }), "", None)
+    }
+
+    fn rescan_spent(&self) -> String {
+        if !self.may_custody("rescan_spent") { return not_authorized(); }
+        self.start_core_job("rescan_spent", json!({}), "", None)
     }
 
     fn reveal_seed(&self, password: String) -> String {

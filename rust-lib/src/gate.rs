@@ -101,7 +101,7 @@ pub fn holds_any_role(role_holders: &[String], caller: &Caller) -> bool {
 /// it belongs with opening rather than with spending. A list, so the set is one assertable value.
 pub const CUSTODIAN_METHODS: &[&str] = &[
     "open_wallet", "create_wallet", "restore_from_seed", "restore_from_keys",
-    "change_password", "reveal_seed", "reveal_view_key", "set_active_network",
+    "change_password", "reveal_seed", "reveal_view_key", "rescan_spent", "set_active_network",
     // Which daemon the wallet talks to is a privacy and trust decision, and it is device-wide:
     // it belongs with opening a wallet, not with spending from one.
     "set_node_config",
