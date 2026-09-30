@@ -11419,11 +11419,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1790730556,
-        "narHash": "sha256-Ha0T13roQ63UdaMLRAeEwdGSSSVA4XBzwm61RJB4Drs=",
+        "lastModified": 1790731528,
+        "narHash": "sha256-bjyztCDACZSueNfCdxOM//r1FAnAsa4qXpwwfK6gH7k=",
         "owner": "logos-co",
         "repo": "logos-monero-wallet-core-module",
-        "rev": "e266a7b77dcb44b73f88596a5c1ad5f77a406dcf",
+        "rev": "f1ffbeecc113676bd9261e697ba674c96c4c90a3",
         "type": "github"
       },
       "original": {
