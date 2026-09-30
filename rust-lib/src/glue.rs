@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::gate;
-use crate::model::{format_xmr, is_network, normalize_history, parse_xmr, Registry, SendState, Sends, WalletMeta, NETWORKS};
+use crate::model::{classify_commit_result, format_xmr, is_network, normalize_history, parse_xmr, Registry, SendState, Sends, WalletMeta, NETWORKS};
 
 pub trait MoneroWalletBackendModule: Send + Sync + 'static {
     /// Name who holds the two roles: `{ approvers?, custodians? }` → `{ ok, approvers, custodians }`.
@@ -89,7 +89,7 @@ pub trait MoneroWalletBackendModule: Send + Sync + 'static {
     /// Build a transaction for review. `send_json`: `{ address, amountXmr | amount, priority?, accountIndex? }`.
     /// `{ ok, requestId }`; poll send_status for the preview. At most one send in flight.
     fn prepare_send(&self, send_json: String) -> String;
-    /// `{ ok, requestId, state: preparing|previewed|committing|sent|failed|cancelled, preview?, txids?, error? }`.
+    /// `{ ok, requestId, state: preparing|previewed|committing|sent|failed|cancelled, preview?, txids?, warning?, error? }`.
     fn send_status(&self, request_id: String) -> String;
     /// `{ ok, sends: [{ requestId, state }] }` — every request not yet acked away; what a headless
     /// approver polls to find previews awaiting a decision.
@@ -377,7 +377,9 @@ impl MoneroWalletBackendModuleImpl {
                                     }
                                 } else {
                                     s.txids = res.get("txids").and_then(Value::as_str).map(String::from);
-                                    s.state = SendState::Sent;
+                                    let (state, warning) = classify_commit_result(&res);
+                                    s.state = state;
+                                    s.warning = warning;
                                 }
                                 changed = Some((rid.clone(), s.state.name().to_string()));
                             }

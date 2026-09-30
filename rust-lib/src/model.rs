@@ -154,6 +154,21 @@ pub enum SendState {
     Unknown(String),
 }
 
+/// Once the engine has entered relay, only an explicit daemon rejection can prove failure.
+/// A lost reply is uncertain, while a successful relay with a failed wallet save is still sent.
+pub fn classify_commit_result(result: &Value) -> (SendState, Option<String>) {
+    let wallet_stored = result.get("walletStored").and_then(Value::as_bool) != Some(false);
+    if result.get("relayOutcome").and_then(Value::as_str) == Some("unknown") {
+        let detail = result.get("error").and_then(Value::as_str).unwrap_or("broadcast reply was lost");
+        let save_note = if wallet_stored { "" } else { " The wallet also could not save its updated state." };
+        return (SendState::Unknown(format!("The broadcast outcome is uncertain ({detail}).{save_note} Check Activity and recheck spent outputs before sending again.")), None);
+    }
+    let warning = if wallet_stored { None } else {
+        Some("The network accepted this send, but the wallet could not save its updated state. Keep the wallet open, check Activity, and repair the wallet before another send.".into())
+    };
+    (SendState::Sent, warning)
+}
+
 impl SendState {
     pub fn name(&self) -> &'static str {
         match self {
@@ -179,6 +194,7 @@ pub struct SendRequest {
     pub preview: Option<Value>,
     pub tx_handle: Option<String>,
     pub txids: Option<String>,
+    pub warning: Option<String>,
     pub core_job: Option<(String, String)>,
     pub prepared_at: Option<Instant>,
 }
@@ -201,7 +217,7 @@ impl Sends {
         let id = format!("s{}", self.next); self.next += 1;
         self.reqs.insert(id.clone(), SendRequest {
             request_id: id.clone(), state: SendState::Preparing, request, preview: None,
-            tx_handle: None, txids: None, core_job: None, prepared_at: None,
+            tx_handle: None, txids: None, warning: None, core_job: None, prepared_at: None,
         });
         Ok(id)
     }
@@ -235,7 +251,7 @@ impl Sends {
             None => json!({ "ok": false, "error": "unknown requestId" }),
             Some(r) => json!({
                 "ok": true, "requestId": r.request_id, "state": r.state.name(),
-                "preview": r.preview, "txids": r.txids,
+                "preview": r.preview, "txids": r.txids, "warning": r.warning,
                 "error": match &r.state {
                     SendState::Failed(e) | SendState::Unknown(e) => Some(e.clone()),
                     _ => None,
@@ -355,6 +371,21 @@ mod tests {
         // And it does not read as either success or failure.
         assert_ne!(st["state"], "sent");
         assert_ne!(st["state"], "failed");
+    }
+
+    #[test]
+    fn broadcast_outcome_and_wallet_save_are_classified_separately() {
+        let (state, warning) = classify_commit_result(&json!({"walletStored": false}));
+        assert_eq!(state, SendState::Sent);
+        assert!(warning.unwrap().contains("network accepted"));
+
+        let (state, warning) = classify_commit_result(&json!({"relayOutcome": "unknown", "error": "reply lost", "walletStored": false}));
+        assert!(matches!(state, SendState::Unknown(reason) if reason.contains("reply lost") && reason.contains("could not save")));
+        assert!(warning.is_none());
+
+        let (state, warning) = classify_commit_result(&json!({"walletStored": true}));
+        assert_eq!(state, SendState::Sent);
+        assert!(warning.is_none());
     }
 
     #[test]
