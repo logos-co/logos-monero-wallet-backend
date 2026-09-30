@@ -13,6 +13,23 @@ pub const ATOMIC_PER_XMR: u64 = 1_000_000_000_000;
 
 pub fn is_network(n: &str) -> bool { NETWORKS.contains(&n) }
 
+/// An open wallet owns the session's network. The picker only selects the next wallet.
+pub fn effective_network<'a>(status: &'a Value, selected: &'a str) -> &'a str {
+    if status.get("wallet").and_then(Value::as_str).is_some_and(|w| !w.is_empty()) {
+        if let Some(network) = status.get("network").and_then(Value::as_str).filter(|n| is_network(n)) {
+            return network;
+        }
+    }
+    selected
+}
+
+/// Failed opens leave no wallet, so the user can select the correct network and try again.
+/// An unavailable or opening engine cannot prove that changing networks is safe.
+pub fn can_change_network(status: &Value) -> bool {
+    matches!(status.get("state").and_then(Value::as_str), Some("no_wallet" | "failed"))
+        && status.get("wallet").and_then(Value::as_str).unwrap_or("").is_empty()
+}
+
 /// Atomic units (decimal string, u64) → "1.234567890000" XMR. Exact: no floating point.
 pub fn format_xmr(atomic: &str) -> Option<String> {
     let v: u64 = atomic.parse().ok()?;
@@ -79,6 +96,27 @@ impl Registry {
 
     pub fn get(&self, name: &str) -> Option<&WalletMeta> { self.wallets.get(name) }
     pub fn names(&self) -> Vec<String> { self.wallets.keys().cloned().collect() }
+
+    /// A filename cannot tell us its network. Clear legacy guesses until an open verifies it.
+    pub fn discover_wallet(&mut self, name: &str) -> Result<(), String> {
+        match self.get(name).cloned() {
+            Some(mut meta) if meta.address.is_empty() && !meta.network.is_empty() => {
+                meta.network.clear();
+                self.upsert(name, meta)
+            }
+            None => self.upsert(name, WalletMeta::default()),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn network_for_open(&self, name: &str, selected: &str) -> Result<String, String> {
+        if let Some(meta) = self.get(name) {
+            if !meta.address.is_empty() && !meta.network.is_empty() && meta.network != selected {
+                return Err(format!("This wallet belongs to {}. Select {} before opening it.", meta.network, meta.network));
+            }
+        }
+        Ok(selected.into())
+    }
 
     pub fn upsert(&mut self, name: &str, meta: WalletMeta) -> Result<(), String> {
         self.wallets.insert(name.into(), meta);
@@ -284,6 +322,46 @@ mod tests {
         assert!(!text.contains("password") && !text.contains("seed"));
         let r = Registry::new(Some(p));
         assert_eq!(r.get("main").unwrap().network, "stagenet");
+    }
+
+    #[test]
+    fn selected_mainnet_cannot_open_a_registered_stagenet_wallet() {
+        let mut r = Registry::new(None);
+        r.upsert("stage", WalletMeta { network: "stagenet".into(), address: "stage-address".into(), ..Default::default() }).unwrap();
+        assert!(r.network_for_open("stage", "mainnet").unwrap_err().contains("Select stagenet"));
+        assert_eq!(r.network_for_open("stage", "stagenet").unwrap(), "stagenet");
+        assert_eq!(r.network_for_open("new", "mainnet").unwrap(), "mainnet");
+    }
+
+    #[test]
+    fn discovering_a_file_never_assigns_the_selected_network() {
+        let mut r = Registry::new(None);
+        r.discover_wallet("unknown").unwrap();
+        assert_eq!(r.get("unknown").unwrap().network, "");
+        r.upsert("legacy-guess", WalletMeta { network: "mainnet".into(), ..Default::default() }).unwrap();
+        r.discover_wallet("legacy-guess").unwrap();
+        assert_eq!(r.get("legacy-guess").unwrap().network, "");
+        r.upsert("verified", WalletMeta { network: "stagenet".into(), address: "stage-address".into(), ..Default::default() }).unwrap();
+        r.discover_wallet("verified").unwrap();
+        assert_eq!(r.get("verified").unwrap().network, "stagenet");
+    }
+
+    #[test]
+    fn open_wallet_network_overrides_the_picker_including_busy_status() {
+        let status = json!({ "wallet": "stage", "network": "stagenet", "state": "ready", "busy": true });
+        assert_eq!(effective_network(&status, "mainnet"), "stagenet");
+        assert_eq!(effective_network(&json!({ "wallet": "", "network": "stagenet", "state": "no_wallet" }), "mainnet"), "mainnet");
+    }
+
+    #[test]
+    fn failed_open_can_recover_by_switching_network_but_active_sessions_cannot() {
+        assert!(can_change_network(&json!({ "wallet": "", "state": "failed" })));
+        assert!(can_change_network(&json!({ "wallet": "", "state": "no_wallet" })));
+        for state in ["ready", "syncing", "opening", "closing", "unavailable"] {
+            assert!(!can_change_network(&json!({ "wallet": "", "state": state })));
+        }
+        assert!(!can_change_network(&json!({ "wallet": "stage", "state": "failed" })));
+        assert!(!can_change_network(&Value::Null));
     }
 
     #[test]

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::gate;
-use crate::model::{format_xmr, is_network, normalize_history, parse_xmr, Registry, SendState, Sends, WalletMeta, NETWORKS};
+use crate::model::{can_change_network, effective_network, format_xmr, is_network, normalize_history, parse_xmr, Registry, SendState, Sends, WalletMeta, NETWORKS};
 
 pub trait MoneroWalletBackendModule: Send + Sync + 'static {
     /// Name who holds the two roles: `{ approvers?, custodians? }` → `{ ok, approvers, custodians }`.
@@ -38,9 +38,10 @@ pub trait MoneroWalletBackendModule: Send + Sync + 'static {
     fn set_active_network(&self, network: String) -> String;
 
     /// `{ ok, wallets: [{ name, network, label, viewOnly, restoreHeight, address }] }` — the
-    /// registry merged with what the engine finds on disk.
+    /// registry merged with what the engine finds on disk; unverified files have network="".
     fn list_wallets(&self) -> String;
-    /// CUSTODIAN. Open a registered wallet on the active network. `{ ok, jobId }`; poll job_status.
+    /// CUSTODIAN. Open on the selected network; a verified wallet on another network is refused.
+    /// `{ ok, jobId }`; poll job_status. The core verifies the encrypted wallet before connecting.
     fn open_wallet(&self, name: String, password: String) -> String;
     /// CUSTODIAN. `{ ok, jobId }`. The wallet is registered on the active network.
     fn create_wallet(&self, name: String, password: String, label: String) -> String;
@@ -226,6 +227,12 @@ impl MoneroWalletBackendModuleImpl {
         ok(json!({ "jobId": jid }))
     }
 
+    fn current_network(&self) -> String {
+        let st = modules().monero_wallet_core_module.status().unwrap_or(Value::Null);
+        let g = self.inner.lock().unwrap();
+        effective_network(&st, &g.active).into()
+    }
+
     fn persist_settings(g: &Inner) {
         if let Some(p) = g.settings_path.as_ref() {
             let tmp = p.with_extension("json.tmp");
@@ -343,7 +350,8 @@ impl MoneroWalletBackendModuleImpl {
                         // A wallet that opened is registered/refreshed with what the engine learned.
                         if kind == "open_wallet" || kind == "create_wallet" || kind == "restore_from_seed" || kind == "restore_from_keys" {
                             let mut m = meta.or_else(|| g.registry.get(&wallet).cloned()).unwrap_or_default();
-                            if m.network.is_empty() { m.network = g.active.clone(); }
+                            if let Some(n) = res.get("network").and_then(Value::as_str) { m.network = n.into(); }
+                            else if m.network.is_empty() { m.network = g.active.clone(); }
                             if let Some(a) = res.get("address").and_then(Value::as_str) { m.address = a.into(); }
                             if let Some(v) = res.get("watchOnly").and_then(Value::as_bool) { m.view_only = v; }
                             let _ = g.registry.upsert(&wallet, m).map_err(|e| eprintln!("monero_wallet_backend: registry persist failed: {e}"));
@@ -513,10 +521,12 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
         if !self.may_custody("set_active_network") { return not_authorized(); }
         if !is_network(&network) { return err(format!("unknown network: {network}")); }
         let st = modules().monero_wallet_core_module.status().unwrap_or(Value::Null);
-        if st.get("state").and_then(Value::as_str).unwrap_or("no_wallet") != "no_wallet" {
+        if !can_change_network(&st) {
             return err("close the open wallet before switching networks");
         }
         let mut g = self.inner.lock().unwrap();
+        if g.jobs.values().any(|j| matches!(j.kind.as_str(), "open_wallet" | "create_wallet" | "restore_from_seed" | "restore_from_keys" | "close_wallet")
+            && matches!(j.state.as_str(), "queued" | "running")) { return err("a wallet operation is in flight"); }
         if !g.sends.open_requests().is_empty() { return err("a send is in flight"); }
         g.active = network;
         Self::persist_settings(&g);
@@ -526,13 +536,10 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     fn list_wallets(&self) -> String {
         let on_disk = modules().monero_wallet_core_module.list_wallets().unwrap_or(json!([]));
         let mut g = self.inner.lock().unwrap();
-        // A wallet on disk the registry has not seen is registered on the active network.
+        // Discover files without guessing their network from the picker.
         if let Some(arr) = on_disk.as_array() {
             for n in arr.iter().filter_map(Value::as_str) {
-                if g.registry.get(n).is_none() {
-                    let m = WalletMeta { network: g.active.clone(), ..Default::default() };
-                    let _ = g.registry.upsert(n, m);
-                }
+                let _ = g.registry.discover_wallet(n);
             }
         }
         ok(json!({ "wallets": g.registry.list_json() }))
@@ -542,7 +549,10 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
         if !self.may_custody("open_wallet") { return not_authorized(); }
         let network = {
             let g = self.inner.lock().unwrap();
-            g.registry.get(&name).map(|m| m.network.clone()).unwrap_or_else(|| g.active.clone())
+            match g.registry.network_for_open(&name, &g.active) {
+                Ok(network) => network,
+                Err(e) => return err(e),
+            }
         };
         self.start_core_job("open_wallet", json!({ "name": name, "password": password, "network": network }), &name, None)
     }
@@ -626,7 +636,7 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
                                        st.get("daemonHeight").and_then(Value::as_u64)) {
             st["syncPercent"] = json!(if dh == 0 { 0 } else { ((wh.min(dh) as u128 * 100) / dh as u128) as u64 });
         }
-        st["activeNetwork"] = json!(g.active);
+        st["activeNetwork"] = json!(effective_network(&st, &g.active));
         if let Some(n) = st.get("wallet").and_then(Value::as_str) {
             if let Some(m) = g.registry.get(n) { st["meta"] = serde_json::to_value(m).unwrap_or(Value::Null); }
         }
@@ -680,17 +690,17 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     }
 
     fn address_valid(&self, address: String) -> bool {
-        let network = self.inner.lock().unwrap().active.clone();
+        let network = self.current_network();
         modules().monero_wallet_core_module.address_valid(&address, &network).unwrap_or(false)
     }
 
     fn node_health(&self) -> String {
-        let network = self.inner.lock().unwrap().active.clone();
+        let network = self.current_network();
         modules().monero_node_module.node_health(&network).unwrap_or_else(|e| err(format!("node module: {e:?}")))
     }
 
     fn node_config(&self) -> String {
-        let network = self.inner.lock().unwrap().active.clone();
+        let network = self.current_network();
         let raw = match modules().monero_node_module.get_node_config(&network) {
             Ok(s) => s,
             Err(e) => return err(format!("node module: {e:?}")),
@@ -712,7 +722,7 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     }
 
     fn local_node(&self) -> String {
-        let network = self.inner.lock().unwrap().active.clone();
+        let network = self.current_network();
         modules().monero_node_module.local_node(&network).unwrap_or_else(|e| err(format!("node module: {e:?}")))
     }
 
