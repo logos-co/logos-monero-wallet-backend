@@ -9,7 +9,10 @@
   "description": "Monero wallet coordinator: wallet registry, sync poller, balances and history, send orchestration (build → review → broadcast). Holds no key material.",
   "author": "Logos Core Team",
   "main": "monero_wallet_backend_plugin",
-  "dependencies": ["monero_wallet_core_module", "monero_node_module"],
+  "dependencies": [
+    { "name": "monero_wallet_core_module", "version": "~0.1.1" },
+    { "name": "monero_node_module", "version": "~0.1.0" }
+  ],
   "include": [],
   "capabilities": [],
   "codegen": {
