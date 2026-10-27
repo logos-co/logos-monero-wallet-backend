@@ -8,7 +8,7 @@
 //! The UI never sees a core receipt: this module tracks `(jobId, receipt)` and hands the UI
 //! its own job id, so a job id that crosses the event plane authorises nothing.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use logos_rust_sdk::LogosError;
 use std::time::{Duration, Instant};
@@ -183,6 +183,12 @@ fn core_json(r: Result<Value, LogosError>) -> Result<Value, String> {
     r.map_err(|e| format!("wallet core: {e:?}"))
 }
 
+/// The generated client types LIDL maps; the rest of this file reads them as JSON.
+fn obj(m: BTreeMap<String, Value>) -> Value { Value::Object(m.into_iter().collect()) }
+fn map_of(v: Value) -> BTreeMap<String, Value> {
+    match v { Value::Object(m) => m.into_iter().collect(), _ => BTreeMap::new() }
+}
+
 /// The engine's `result`-typed replies come back as the StdLogosResult envelope; unwrap one.
 fn unwrap_result(v: Value) -> Result<Value, String> {
     if let Some(s) = v.get("success").and_then(Value::as_bool) {
@@ -210,7 +216,7 @@ impl MoneroWalletBackendModuleImpl {
 
     fn start_core_job(&self, kind: &str, params: Value, wallet: &str, meta: Option<WalletMeta>) -> String {
         let core = modules().monero_wallet_core_module;
-        let v = match core_json(core.start_job(kind, &params)).and_then(unwrap_result) {
+        let v = match core_json(core.start_job(kind, &map_of(params))).and_then(unwrap_result) {
             Ok(v) => v,
             Err(e) => return err(e),
         };
@@ -228,7 +234,7 @@ impl MoneroWalletBackendModuleImpl {
     }
 
     fn current_network(&self) -> String {
-        let st = modules().monero_wallet_core_module.status().unwrap_or(Value::Null);
+        let st = modules().monero_wallet_core_module.status().map(obj).unwrap_or(Value::Null);
         let g = self.inner.lock().unwrap();
         effective_network(&st, &g.active).into()
     }
@@ -316,7 +322,7 @@ impl MoneroWalletBackendModuleImpl {
             // Distinguish "the engine has not finished" from "the engine is not there".
             let reply = core.job_status(&cid, &receipt);
             let reachable = reply.is_ok();
-            let st = reply.unwrap_or(Value::Null);
+            let st = reply.map(obj).unwrap_or(Value::Null);
             if !reachable {
                 Self::note_engine_miss(inner, &jid);
                 continue;
@@ -422,7 +428,7 @@ impl MoneroWalletBackendModuleImpl {
 
         // 2) Sync + balance, on the slow tick.
         if slow {
-            if let Ok(st) = core.status() {
+            if let Ok(st) = core.status().map(obj) {
                 let state = st.get("state").and_then(Value::as_str).unwrap_or("").to_string();
                 let wh = st.get("walletHeight").and_then(Value::as_u64).unwrap_or(0);
                 let dh = st.get("daemonHeight").and_then(Value::as_u64).unwrap_or(0);
@@ -520,7 +526,7 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     fn set_active_network(&self, network: String) -> String {
         if !self.may_custody("set_active_network") { return not_authorized(); }
         if !is_network(&network) { return err(format!("unknown network: {network}")); }
-        let st = modules().monero_wallet_core_module.status().unwrap_or(Value::Null);
+        let st = modules().monero_wallet_core_module.status().map(obj).unwrap_or(Value::Null);
         if !can_change_network(&st) {
             return err("close the open wallet before switching networks");
         }
@@ -534,7 +540,7 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     }
 
     fn list_wallets(&self) -> String {
-        let on_disk = modules().monero_wallet_core_module.list_wallets().unwrap_or(json!([]));
+        let on_disk = modules().monero_wallet_core_module.list_wallets().map(Value::Array).unwrap_or(json!([]));
         let mut g = self.inner.lock().unwrap();
         // Discover files without guessing their network from the picker.
         if let Some(arr) = on_disk.as_array() {
@@ -628,7 +634,7 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     }
 
     fn wallet_status(&self) -> String {
-        let mut st = modules().monero_wallet_core_module.status().unwrap_or(json!({ "state": "unavailable" }));
+        let mut st = modules().monero_wallet_core_module.status().map(obj).unwrap_or(json!({ "state": "unavailable" }));
         let g = self.inner.lock().unwrap();
         // Only when the engine answered with heights. A busy engine sends none at all, and a
         // percentage derived from their absence is a claim about a chain nobody read.
@@ -662,7 +668,7 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     fn receive_info(&self, account_index: i64) -> String {
         let core = modules().monero_wallet_core_module;
         let addr = core.address(account_index, 0).unwrap_or_default();
-        let subs = core.subaddresses(account_index).unwrap_or(json!([]));
+        let subs = core.subaddresses(account_index).map(Value::Array).unwrap_or(json!([]));
         ok(json!({ "address": addr, "subaddresses": subs }))
     }
 
@@ -684,7 +690,7 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
         // "no rows" and "could not ask" are different answers; only one of them is
         // "No transactions yet." on the user's screen.
         match modules().monero_wallet_core_module.history() {
-            Ok(rows) => ok(json!({ "rows": normalize_history(&rows) })),
+            Ok(rows) => ok(json!({ "rows": normalize_history(&Value::Array(rows)) })),
             Err(_) => err("the wallet engine did not answer"),
         }
     }
@@ -831,7 +837,7 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
         };
         emit_send_status_changed(&request_id, "cancelled");
         if let Some(h) = handle {
-            let _ = modules().monero_wallet_core_module.start_job("dispose_transaction", &json!({ "txHandle": h }));
+            let _ = modules().monero_wallet_core_module.start_job("dispose_transaction", &map_of(json!({ "txHandle": h })));
         }
         ok(json!({ "requestId": request_id }))
     }
