@@ -103,8 +103,8 @@ pub const CUSTODIAN_METHODS: &[&str] = &[
     "open_wallet", "create_wallet", "restore_from_seed", "restore_from_keys",
     "change_password", "reveal_seed", "reveal_view_key", "set_active_network",
     // Which daemon the wallet talks to is a privacy and trust decision, and it is device-wide:
-    // it belongs with opening a wallet, not with spending from one.
-    "set_node_config",
+    // it belongs with opening a wallet, not with spending from one. So is what goes over Tor.
+    "set_node_config", "set_tor_use",
 ];
 
 /// Approver-only: the one decision that moves money. Governs BROADCAST — the engine signed at build.
@@ -148,6 +148,8 @@ mod tests {
         assert!(!custodian_admits("open_wallet", &r.custodians, &m("monero_wallet_cli")));
         assert!(!approver_admits("confirm_send", &r.approvers, &m("monero_wallet_cli")));
         assert!(!custodian_admits("open_wallet", &r.custodians, &m("some_other_module")));
+        assert!(custodian_admits("set_tor_use", &r.custodians, &m("monero_wallet_ui")));
+        assert!(!custodian_admits("set_tor_use", &r.custodians, &m("monero_wallet_cli")));
     }
 
     #[test]

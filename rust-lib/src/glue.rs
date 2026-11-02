@@ -80,13 +80,19 @@ pub trait MoneroWalletBackendModule: Send + Sync + 'static {
     /// Whether monerod_module can serve the active network: `{ ok, available, rpcUrl?, status?, error? }`.
     fn local_node(&self) -> String;
     /// CUSTODIAN. Point the active network at a different daemon.
-    /// `{ url, username?, password?, proxy?, proxyRequired?, trusted?, mode? }` — omitting `password`
+    /// `{ url, onionUrl?, username?, password?, proxy?, trusted?, mode? }` — omitting `password`
     /// KEEPS the stored one; send `""` to clear it. `mode` is `remote` unless it says `local`.
+    /// `proxy` is which Tor: empty for the one that comes with Logos, else `socks5h://host:port`.
     /// Refused while a wallet is open, because wallet2 binds its daemon at init.
     fn set_node_config(&self, config_json: String) -> String;
+    /// "Use Tor for", from the node module: `{ ok, torUse: all|identifying|none, torUseChosen, existing }`.
+    fn tor_use(&self) -> String;
+    /// CUSTODIAN. Store the user's choice; refused while a wallet is open.
+    fn set_tor_use(&self, mode: String) -> String;
 
     /// Build a transaction for review. `send_json`: `{ address, amountXmr | amount, priority?, accountIndex? }`.
     /// `{ ok, requestId }`; poll send_status for the preview. At most one send in flight.
+    /// `{ ok: false, code: "waiting_for_tor" }` while the wallet has not moved to Tor yet.
     fn prepare_send(&self, send_json: String) -> String;
     /// `{ ok, requestId, state: preparing|previewed|committing|sent|failed|cancelled, preview?, txids?, error? }`.
     fn send_status(&self, request_id: String) -> String;
@@ -765,8 +771,31 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
         }
     }
 
+    fn tor_use(&self) -> String {
+        modules().monero_node_module.tor_use().unwrap_or_else(|e| err(format!("node module: {e:?}")))
+    }
+
+    fn set_tor_use(&self, mode: String) -> String {
+        if !self.may_custody("set_tor_use") { return not_authorized(); }
+        // The node module locks it too, once the engine reports the open; this also covers an
+        // engine that does not report it.
+        let state = modules().monero_wallet_core_module.status().ok()
+            .and_then(|s| s.get("state").and_then(|v| v.as_str().map(str::to_string)))
+            .unwrap_or_default();
+        if state != "no_wallet" && !state.is_empty() && state != "failed" {
+            return err("Close your open accounts to change this.");
+        }
+        modules().monero_node_module.set_tor_use(&mode).unwrap_or_else(|e| err(format!("node module: {e:?}")))
+    }
+
     fn prepare_send(&self, send_json: String) -> String {
         if !self.may_request() { return not_authorized(); }
+        // The engine refuses too; asking first gives the surface a code rather than a failed send.
+        let st = modules().monero_wallet_core_module.status().map(obj).unwrap_or(Value::Null);
+        if st.get("waitingForTor").and_then(Value::as_bool) == Some(true) {
+            return json!({ "ok": false, "code": "waiting_for_tor",
+                           "error": "You can send once the wallet has caught up and moved to Tor." }).to_string();
+        }
         let p: Value = match serde_json::from_str(&send_json) { Ok(v) => v, Err(e) => return err(e) };
         let amount = match (p.get("amountXmr").and_then(Value::as_str), p.get("amount").and_then(Value::as_str)) {
             (Some(x), _) => match parse_xmr(x) { Some(a) => a, None => return err("amountXmr is not a valid XMR amount (max 12 decimals)") },
