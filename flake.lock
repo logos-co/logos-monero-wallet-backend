@@ -541,11 +541,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1791388275,
-        "narHash": "sha256-tu2Cc1Zf8QvrztCP8kRy3O16x2QpjJbLXDBzGXMyVkY=",
+        "lastModified": 1793399121,
+        "narHash": "sha256-nEajzuaZt+wZWa4m6LNLuaJtnw+GQKodaACNA6QISLg=",
         "owner": "logos-co",
         "repo": "logos-monero-nix",
-        "rev": "5f7ee441d0e3b823b423117d18750352ab68b0ff",
+        "rev": "f8aa90321fdd13170c9ab8c493e90839d14c34b4",
         "type": "github"
       },
       "original": {
@@ -1440,14 +1440,15 @@
         "logos-module-builder": [
           "logos-module-builder"
         ],
-        "monerod_module": "monerod_module"
+        "monerod_module": "monerod_module",
+        "tor_module": "tor_module"
       },
       "locked": {
-        "lastModified": 1791395777,
-        "narHash": "sha256-cyI5xkPIN7mLhDNb1KL16UX+gw/yt+aHVATwTylGz84=",
+        "lastModified": 1793720579,
+        "narHash": "sha256-RuroYE60aVUbNiu3diaDbKNarfXyX8cFjkijci9J73A=",
         "owner": "logos-co",
         "repo": "logos-monero-node-module",
-        "rev": "1bf8df7e5872f771bf5298287bb1a36866b8e7d5",
+        "rev": "ec0a7c01e0073bd77013005401641ba78c206d9c",
         "type": "github"
       },
       "original": {
@@ -1467,11 +1468,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1791397557,
-        "narHash": "sha256-fmulBrbPDvKPFD/LNp4XzbVPzIwcIdmUPNwvZHxSlWM=",
+        "lastModified": 1793722639,
+        "narHash": "sha256-2r/Y8U6wp3soyDuUf57N/3XJdmWIOz1HULwFE42XqQg=",
         "owner": "logos-co",
         "repo": "logos-monero-wallet-core-module",
-        "rev": "35f31f2390017b4c3cc83e6733bebc4270efcc04",
+        "rev": "4533dc2fd81150d741a3006bd28cda6df0df0afa",
         "type": "github"
       },
       "original": {
@@ -2261,6 +2262,27 @@
       "original": {
         "owner": "oxalica",
         "repo": "rust-overlay",
+        "type": "github"
+      }
+    },
+    "tor_module": {
+      "inputs": {
+        "logos-module-builder": [
+          "monero_node_module",
+          "logos-module-builder"
+        ]
+      },
+      "locked": {
+        "lastModified": 1793396235,
+        "narHash": "sha256-uhF/cCnFvKZCYNN/o+LQytsDiV73xyBtmD+3nR6NO30=",
+        "owner": "logos-co",
+        "repo": "logos-tor-module",
+        "rev": "82cfdc98c7a2694db53d0f0d1f5680c78082e648",
+        "type": "github"
+      },
+      "original": {
+        "owner": "logos-co",
+        "repo": "logos-tor-module",
         "type": "github"
       }
     }
