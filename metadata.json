@@ -1,7 +1,7 @@
 {
   "name": "monero_wallet_backend",
   "display_name": "Monero Wallet Backend",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "core",
   "interface": "cdylib",
   "concurrency": "multi",
@@ -10,8 +10,8 @@
   "author": "Logos Core Team",
   "main": "monero_wallet_backend_plugin",
   "dependencies": [
-    { "name": "monero_wallet_core_module", "version": "~0.1.1" },
-    { "name": "monero_node_module", "version": "~0.1.0" }
+    { "name": "monero_wallet_core_module", "version": "~0.2.0" },
+    { "name": "monero_node_module", "version": "~0.2.0" }
   ],
   "include": [],
   "capabilities": [],
