@@ -85,9 +85,10 @@ pub trait MoneroWalletBackendModule: Send + Sync + 'static {
     /// `proxy` is which Tor: empty for the one that comes with Logos, else `socks5h://host:port`.
     /// Refused while a wallet is open, because wallet2 binds its daemon at init.
     fn set_node_config(&self, config_json: String) -> String;
-    /// "Use Tor for", from the node module: `{ ok, torUse: all|identifying|none, torUseChosen, existing }`.
+    /// The active network's "Use Tor for", from the node module: `{ ok, network, torUse:
+    /// all|identifying|none, torUseChosen, existing }`.
     fn tor_use(&self) -> String;
-    /// CUSTODIAN. Store the user's choice; refused while a wallet is open.
+    /// CUSTODIAN. Store the user's choice for the active network; refused while a wallet is open.
     fn set_tor_use(&self, mode: String) -> String;
 
     /// Build a transaction for review. `send_json`: `{ address, amountXmr | amount, priority?, accountIndex? }`.
@@ -772,7 +773,8 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
     }
 
     fn tor_use(&self) -> String {
-        modules().monero_node_module.tor_use().unwrap_or_else(|e| err(format!("node module: {e:?}")))
+        let network = self.inner.lock().unwrap().active.clone();
+        modules().monero_node_module.tor_use(&network).unwrap_or_else(|e| err(format!("node module: {e:?}")))
     }
 
     fn set_tor_use(&self, mode: String) -> String {
@@ -785,7 +787,8 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
         if state != "no_wallet" && !state.is_empty() && state != "failed" {
             return err("Close your open accounts to change this.");
         }
-        modules().monero_node_module.set_tor_use(&mode).unwrap_or_else(|e| err(format!("node module: {e:?}")))
+        let network = self.inner.lock().unwrap().active.clone();
+        modules().monero_node_module.set_tor_use(&network, &mode).unwrap_or_else(|e| err(format!("node module: {e:?}")))
     }
 
     fn prepare_send(&self, send_json: String) -> String {
