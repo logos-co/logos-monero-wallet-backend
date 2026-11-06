@@ -26,6 +26,11 @@ your open accounts to change this."). `wallet_status` carries the engine's `torU
 `onTor` and `waitingForTor`; while `waitingForTor` is true (`identifying` before the move to Tor,
 or a Tor route waiting for Tor), `prepare_send` answers `{ ok: false, code: "waiting_for_tor" }`.
 
+**Sending payments** with your own node is the node module's setting too, per network:
+`set_local_sends(via)` stores `servers` (a public node over Tor) or `node` for the active network,
+a custodian method refused while a wallet is open. `tor_use()` and `node_health()` carry it as
+`sends: { localSends, localSendsChosen, localSendsRecommended, sendNode }` while your own node is on.
+
 ```bash
 cargo test --manifest-path rust-lib/Cargo.toml --no-default-features --locked
 nix build
