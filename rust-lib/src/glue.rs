@@ -90,6 +90,10 @@ pub trait MoneroWalletBackendModule: Send + Sync + 'static {
     fn tor_use(&self) -> String;
     /// CUSTODIAN. Store the user's choice for the active network; refused while a wallet is open.
     fn set_tor_use(&self, mode: String) -> String;
+    /// CUSTODIAN. With your own node, where the active network's payments go: `servers` (a public
+    /// node over Tor) or `node`. `{ ok, network, localSends, localSendsChosen,
+    /// localSendsRecommended, sendNode? }`; refused while a wallet is open.
+    fn set_local_sends(&self, via: String) -> String;
 
     /// Build a transaction for review. `send_json`: `{ address, amountXmr | amount, priority?, accountIndex? }`.
     /// `{ ok, requestId }`; poll send_status for the preview. At most one send in flight.
@@ -210,6 +214,15 @@ fn unwrap_result(v: Value) -> Result<Value, String> {
 }
 
 impl MoneroWalletBackendModuleImpl {
+    /// A wallet is open or opening. The node module locks its settings too, once the engine
+    /// reports the open; this also covers an engine that does not report it.
+    fn wallet_in_use(&self) -> bool {
+        let state = modules().monero_wallet_core_module.status().ok()
+            .and_then(|s| s.get("state").and_then(|v| v.as_str().map(str::to_string)))
+            .unwrap_or_default();
+        state != "no_wallet" && !state.is_empty() && state != "failed"
+    }
+
     fn may_custody(&self, method: &str) -> bool {
         gate::custodian_admits(method, &self.roles.lock().unwrap().custodians, &caller())
     }
@@ -779,16 +792,20 @@ impl MoneroWalletBackendModule for MoneroWalletBackendModuleImpl {
 
     fn set_tor_use(&self, mode: String) -> String {
         if !self.may_custody("set_tor_use") { return not_authorized(); }
-        // The node module locks it too, once the engine reports the open; this also covers an
-        // engine that does not report it.
-        let state = modules().monero_wallet_core_module.status().ok()
-            .and_then(|s| s.get("state").and_then(|v| v.as_str().map(str::to_string)))
-            .unwrap_or_default();
-        if state != "no_wallet" && !state.is_empty() && state != "failed" {
+        if self.wallet_in_use() {
             return err("Close your open accounts to change this.");
         }
         let network = self.inner.lock().unwrap().active.clone();
         modules().monero_node_module.set_tor_use(&network, &mode).unwrap_or_else(|e| err(format!("node module: {e:?}")))
+    }
+
+    fn set_local_sends(&self, via: String) -> String {
+        if !self.may_custody("set_local_sends") { return not_authorized(); }
+        if self.wallet_in_use() {
+            return err("Close your open accounts to change this.");
+        }
+        let network = self.inner.lock().unwrap().active.clone();
+        modules().monero_node_module.set_local_sends(&network, &via).unwrap_or_else(|e| err(format!("node module: {e:?}")))
     }
 
     fn prepare_send(&self, send_json: String) -> String {
