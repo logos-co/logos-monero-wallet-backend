@@ -1444,11 +1444,11 @@
         "tor_module": "tor_module"
       },
       "locked": {
-        "lastModified": 1793893058,
-        "narHash": "sha256-DlLb3RHEl+ipSfQiKq48HYVeQIWGC4HUlPdDLvqYq1s=",
+        "lastModified": 1794100234,
+        "narHash": "sha256-D+h8+XnB+q3WM9Doh4Lye0maLhtUU8ySqYyvJ7/Ifz4=",
         "owner": "logos-co",
         "repo": "logos-monero-node-module",
-        "rev": "cbc38419c02b3c32d90eacffdbcef956eb8b0679",
+        "rev": "c33a1596c6adb492a1f1728e57390ce80e9ea0b0",
         "type": "github"
       },
       "original": {

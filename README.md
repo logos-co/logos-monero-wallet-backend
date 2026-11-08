@@ -18,8 +18,9 @@ so a second build could spend the same outputs — and a preview older than 120 
 The review step governs **broadcast**, not signing: the engine signed when it built the
 preview. Nothing here may describe it as offline signing.
 
-**Use Tor for** (`all`, `identifying` or `none`) is the node module's setting; `tor_use()`
-relays it with `torUseChosen` and `existing`, for the first-run screen. `set_tor_use(mode)` is a
+**Use Tor for** (`all`, `identifying` or `none`) is the node module's setting, per network;
+`tor_use()` relays the active network's, with `torUseChosen` and `existing`, for the first-run
+screen. `set_tor_use(mode)` sets it for the active network. It is a
 custodian method, like `set_node_config`, and both are refused while a wallet is open ("Close
 your open accounts to change this."). `wallet_status` carries the engine's `torUse`, `route`,
 `onTor` and `waitingForTor`; while `waitingForTor` is true (`identifying` before the move to Tor,
